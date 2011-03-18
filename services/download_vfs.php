@@ -55,6 +55,27 @@ class MbotDownloadVfs implements IrcService {
       return $ret;
    }
 
+   private function BytesToHuman($bytes, $precision=2) {
+      if($bytes >= 1073741824) {
+         return round(($bytes/1073741824), $precision).' GB';
+      }
+      elseif($bytes >= 1048576) {
+         return round(($bytes/1048576), $precision).' MB';
+      }
+      elseif($bytes >= 1024) {
+         return round(($bytes/1024), $precision).' kB';
+      }
+      return $bytes. ' bytes';
+   }
+
+   private function GetTotalSize($path) {
+      //open to attack, TODO fix this
+      $res = explode("\t",exec("du -sb ".escapeshellarg($path)), 2);
+      if($res[1] != $path)
+         return false;
+      return $res[0];
+   }
+
    private function SendIMDBInfo(&$channel, $rls_name) {
       $data = DownloadParser::ParseMovie($rls_name);
       $search = new imdbsearch();
@@ -63,7 +84,8 @@ class MbotDownloadVfs implements IrcService {
       foreach($results as $result) {
          if($result->year() == $data['year']) {
             $channel->Send('  '.IrcFormat::Green('IMDB Rating:').' '.IrcFormat::Bold($result->rating()).'/10.0');
-            $channel->Send('  '.IrcFormat::Green('Runtime:').' '.$result->runtime().'min');
+            if(!empty($result->runtime()))
+               $channel->Send('  '.IrcFormat::Green('Runtime:').' '.$result->runtime().'min');
             $channel->Send('  '.IrcFormat::Green('URL:').' '.$result->main_url());
             //$channel->Send($result->tagline());
             break;
@@ -83,11 +105,22 @@ class MbotDownloadVfs implements IrcService {
    }
 
    private function HandleStartedLine(IrcSocketHandler $h, $line) {
-      echo 'Started: '.$line."\n";
+      if(!$this->VerifyPath($line))
+         return;
+      $s_pool = IrcSettings::GetInstance()->GetPool('download_vfs');
+      $torrents = isset($s_pool->torrents) ? $s_pool->torrents : array();
+      if(is_array($torrents[$line]))
+         return;
+      $torrents[$line] = array('start_time' => time());
+      $s_pool->torrents = $torrents;
+      IrcSettings::GetInstance()->SavePool('download_vfs');
       return;
    }
    
    private function HandleCompletedLine(IrcSocketHandler $h, $line) {
+      $full_path = $line;
+      $s_pool = IrcSettings::GetInstance()->GetPool('download_vfs');
+      $torrents = isset($s_pool->torrents) ? $s_pool->torrents : array();
       if(!$this->VerifyPath($line))
          return;
       //strip basedir
@@ -102,8 +135,20 @@ class MbotDownloadVfs implements IrcService {
          $channel->Send(IrcFormat::Bold('======================'));
          $channel->Send('New '.IrcFormat::Bold('completed').' download in '.IrcFormat::Red($category));
          $channel->Send($line);
+         //IMDB info
          if($category == 'X264')
             $this->SendIMDBInfo($channel, $line);
+         //size and speed info
+         if(isset($torrents[$full_path])) {
+            $started_ago = time() - $torrents[$full_path]['start_time'];
+            echo $started_ago."\n";
+            $channel->Send(IrcFormat::Green('Started:').' '.Parse::StrTime($started_ago).' ago');
+            $size = $this->GetTotalSize($full_path);
+            if($size !== false) {
+               echo $size."\n";
+               $channel->Send(IrcFormat::Green('Size:').' '.$this->BytesToHuman($size).' ('.$this->BytesToHuman($size/$started_ago).'/s)');
+            }
+         }
          $channel->Send(IrcFormat::Bold('======================'));
       }
    }
